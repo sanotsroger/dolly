@@ -29,7 +29,6 @@ err()     { printf '%s\n' "${C_RED}✖${C_RESET} $*" >&2; }
 # ---------- painéis com bordas unicode (inspirado em btop/gh-dash) ----------
 BOX_WIDTH="$(tput cols 2>/dev/null || echo 80)"
 [ -z "$BOX_WIDTH" ] && BOX_WIDTH=80
-[ "$BOX_WIDTH" -gt 96 ] && BOX_WIDTH=96
 [ "$BOX_WIDTH" -lt 44 ] && BOX_WIDTH=44
 MAX_CHANGE_LINES=12
 
