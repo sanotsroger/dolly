@@ -390,10 +390,10 @@ run_sync() {
 
     # rclone grava "Transferred:"/"Elapsed time:" com espaçamento inconsistente
     # (tab numa linha, espaços na outra); realinhamos nós mesmos ao exibir.
-    stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
-    stats_elapsed="$(grep -E '^Elapsed time:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Elapsed time:[[:space:]]*//')"
-    stats_checks="$(grep -E '^Checks:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Checks:[[:space:]]*//; s/Listed/Listados/')"
-    stats_files="$(grep -E '^Transferred:' "$rlog" 2>/dev/null | grep -v 'ETA' | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
+    stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//' || true)"
+    stats_elapsed="$(grep -E '^Elapsed time:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Elapsed time:[[:space:]]*//' || true)"
+    stats_checks="$(grep -E '^Checks:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Checks:[[:space:]]*//; s/Listed/Listados/' || true)"
+    stats_files="$(grep -E '^Transferred:' "$rlog" 2>/dev/null | grep -v 'ETA' | tail -1 | sed -E 's/^Transferred:[[:space:]]*//' || true)"
     [ -n "$stats_bytes" ]   && box_line "$(printf '%-12s %s' "transferido" "$stats_bytes")"
     [ -n "$stats_elapsed" ] && box_line "$(printf '%-12s %s' "tempo" "$stats_elapsed")"
     [ -n "$stats_checks" ]  && box_line "$(printf '%-12s %s' "verificações" "$stats_checks")"
@@ -456,12 +456,16 @@ run_sync() {
 }
 
 confirm_prod() {
-  local is_mirror="$1"
+  local is_mirror="$1" msg
   if [ "$is_mirror" = "1" ]; then
-    printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade e apagar no destino os arquivos que não existirem mais na origem. Continuar? [y/N] "
+    msg="Isso vai sincronizar de verdade e apagar no destino os arquivos que não existirem mais na origem."
   else
-    printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade (nada será apagado no destino; use --mirror para espelhar remoções). Continuar? [y/N] "
+    msg="Isso vai sincronizar de verdade (nada será apagado no destino; use --mirror para espelhar remoções)."
   fi
+  box_top "confirmação" "$C_YELLOW"
+  box_line "⚠ $msg" "$(printf '%s⚠%s %s' "$C_YELLOW" "$C_RESET" "$msg")" "$C_YELLOW"
+  box_bottom "$C_YELLOW"
+  printf 'Continuar? [y/N] '
   local reply
   read -r reply
   case "$reply" in
