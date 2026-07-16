@@ -12,10 +12,6 @@
 
 </div>
 
----
-
-O nome é um trocadilho: **Dolly**, a ovelha **clonada**, e o *clone* de diretórios que o script faz — usando `rclone` por baixo dos panos.
-
 ## ✨ Recursos
 
 | | |
