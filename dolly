@@ -109,6 +109,7 @@ ${C_BOLD}USO${C_RESET}
   dolly --edit-path|-ep       Abre paths.conf no nano
   dolly --edit-filter|-ef     Abre filters.txt no nano
   dolly --log-delete|-lgd [N] Apaga execuções (dry-run e prod) com mais de N dias (padrão: 30)
+  dolly --view-change-log|-vcl|-vwcl Escolhe dry-run/prod e mostra o(s) changes.log da execução mais recente (via bat)
   dolly -h|--help             Mostra esta ajuda
 
   Por padrão cada par roda com ${C_BOLD}rclone copy${C_RESET} (só copia/atualiza, nunca apaga).
@@ -147,6 +148,8 @@ ${C_BOLD}EXEMPLOS${C_RESET}
   dolly -y --bwlimit 1M --transfers 4
   dolly --log-delete
   dolly -lgd 15
+  dolly --view-change-log
+  dolly -vcl
 EOF
 }
 
@@ -160,6 +163,13 @@ require_rclone() {
 require_nano() {
   if ! command -v nano >/dev/null 2>&1; then
     err_box "nano não encontrado no PATH. Instale-o ou edite o arquivo manualmente."
+    exit 1
+  fi
+}
+
+require_bat() {
+  if ! command -v bat >/dev/null 2>&1; then
+    err_box "bat não encontrado no PATH. Instale-o (cargo install bat) para visualizar os changes.log."
     exit 1
   fi
 }
@@ -265,6 +275,104 @@ cmd_log_delete() {
   else
     ok "$total_deleted execução(ões) removida(s)."
   fi
+}
+
+# encontra o diretório de execução mais recente dentro de um modo (dry-run
+# ou prod), comparando os nomes dos timestamps (formato %Y%m%d-%H%M%S ordena
+# igual cronologicamente)
+find_latest_run_dir() {
+  local mode_dir="$1" d base latest="" latest_base=""
+  for d in "$mode_dir"/*/; do
+    [ -d "$d" ] || continue
+    base="$(basename "$d")"
+    if [ -z "$latest_base" ] || [[ "$base" > "$latest_base" ]]; then
+      latest_base="$base"
+      latest="${d%/}"
+    fi
+  done
+  printf '%s' "$latest"
+}
+
+# pergunta ao usuário se quer ver as execuções de dry-run ou de prod;
+# devolve o caminho do diretório do modo escolhido
+choose_log_mode() {
+  {
+    box_top "dolly · view-change-log"
+    box_line "Qual modo deseja ver?"
+    box_line ""
+    box_line " 1) dry-run"
+    box_line " 2) prod"
+    box_bottom
+  } >&2
+
+  local reply
+  printf 'Escolha [1-2]: ' >&2
+  read -r reply
+  case "$reply" in
+    1) printf '%s' "$LOGS_DIR/dry-run" ;;
+    2) printf '%s' "$LOGS_DIR/prod" ;;
+    *)
+      err_box "Escolha inválida: '$reply'."
+      exit 1
+      ;;
+  esac
+}
+
+# mostra o(s) *.changes.log da execução mais recente do modo escolhido; se
+# houver mais de um (um por job sincronizado), pede ao usuário para escolher qual ver
+cmd_view_change_log() {
+  require_bat
+
+  local mode_dir
+  mode_dir="$(choose_log_mode)"
+
+  local run_dir
+  run_dir="$(find_latest_run_dir "$mode_dir")"
+  if [ -z "$run_dir" ]; then
+    err_box "Nenhuma execução encontrada em $mode_dir." "Rode 'dolly --dry-run' ou 'dolly -y' primeiro."
+    exit 1
+  fi
+
+  local clogs=() f
+  while IFS= read -r -d '' f; do clogs+=("$f"); done \
+    < <(find "$run_dir" -maxdepth 1 -name '*.changes.log' -print0 | sort -z)
+
+  if [ "${#clogs[@]}" -eq 0 ]; then
+    err_box "Nenhum changes.log encontrado em $run_dir."
+    exit 1
+  fi
+
+  local chosen
+  if [ "${#clogs[@]}" -eq 1 ]; then
+    chosen="${clogs[0]}"
+  else
+    box_top "dolly · view-change-log"
+    box_line "Execução: $run_dir"
+    box_line ""
+    local i
+    for i in "${!clogs[@]}"; do
+      box_line "$(printf '%2d) %s' "$((i + 1))" "$(basename "${clogs[$i]}")")"
+    done
+    box_bottom
+
+    local reply idx
+    printf 'Escolha o arquivo [1-%d]: ' "${#clogs[@]}"
+    read -r reply
+    case "$reply" in
+      ''|*[!0-9]*)
+        err_box "Escolha inválida: '$reply'."
+        exit 1
+        ;;
+    esac
+    idx=$((reply - 1))
+    if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#clogs[@]}" ]; then
+      err_box "Escolha fora do intervalo: '$reply'."
+      exit 1
+    fi
+    chosen="${clogs[$idx]}"
+  fi
+
+  bat --language=diff --paging=auto --style=full "$chosen"
 }
 
 # Preenche o array global JOBS com entradas "job|source|destination"
@@ -506,6 +614,10 @@ main() {
     --log-delete|-lgd)
       shift
       cmd_log_delete "$@"
+      return
+      ;;
+    --view-change-log|-vcl|-vwcl)
+      cmd_view_change_log
       return
       ;;
   esac
