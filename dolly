@@ -296,8 +296,8 @@ run_sync() {
     clog="$run_dir/$job.changes.log"
 
     box_top "→ $job"
-    box_line "origem   $src"  "$(printf 'origem   %s%s%s' "$C_DIM" "$src" "$C_RESET")"
-    box_line "destino  $dst"  "$(printf 'destino  %s%s%s' "$C_DIM" "$dst" "$C_RESET")"
+    box_line "→ origem   $src"  "$(printf '%s%s→%s origem   %s%s%s' "$C_GREEN" "$C_BOLD" "$C_RESET" "$C_DIM" "$src" "$C_RESET")"
+    box_line "← destino  $dst"  "$(printf '%s%s←%s destino  %s%s%s' "$C_BLUE" "$C_BOLD" "$C_RESET" "$C_DIM" "$dst" "$C_RESET")"
 
     mkdir -p "$dst"
 
