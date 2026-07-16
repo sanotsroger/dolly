@@ -285,7 +285,7 @@ run_sync() {
   box_bottom
 
   local entry job rest src dst rlog clog combined_raw rc_args status added modified removed cline
-  local stats_bytes stats_elapsed
+  local stats_bytes stats_elapsed stats_checks stats_files
   for entry in "${JOBS[@]}"; do
     job="${entry%%|*}"
     rest="${entry#*|}"
@@ -336,8 +336,12 @@ run_sync() {
     # (tab numa linha, espaços na outra); realinhamos nós mesmos ao exibir.
     stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
     stats_elapsed="$(grep -E '^Elapsed time:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Elapsed time:[[:space:]]*//')"
-    [ -n "$stats_bytes" ]   && box_line "$(printf '%-11s %s' "transferido" "$stats_bytes")"
-    [ -n "$stats_elapsed" ] && box_line "$(printf '%-11s %s' "tempo" "$stats_elapsed")"
+    stats_checks="$(grep -E '^Checks:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Checks:[[:space:]]*//; s/Listed/Listados/')"
+    stats_files="$(grep -E '^Transferred:' "$rlog" 2>/dev/null | grep -v 'ETA' | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
+    [ -n "$stats_bytes" ]   && box_line "$(printf '%-12s %s' "transferido" "$stats_bytes")"
+    [ -n "$stats_elapsed" ] && box_line "$(printf '%-12s %s' "tempo" "$stats_elapsed")"
+    [ -n "$stats_checks" ]  && box_line "$(printf '%-12s %s' "verificações" "$stats_checks")"
+    [ -n "$stats_files" ]   && box_line "$(printf '%-12s %s' "arquivos" "$stats_files")"
 
     if [ -s "$clog" ]; then
       box_divider
