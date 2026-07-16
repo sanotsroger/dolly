@@ -109,7 +109,10 @@ ${C_BOLD}USO${C_RESET}
   dolly --edit-path|-ep       Abre paths.conf no editor disponível (nano, vim ou vi)
   dolly --edit-filter|-ef     Abre filters.txt no editor disponível (nano, vim ou vi)
   dolly --log-delete|-lgd [N] Apaga execuções (dry-run e prod) com mais de N dias (padrão: 30)
-  dolly --view-change-log|-vcl|-vwcl Escolhe dry-run/prod e mostra o(s) changes.log da execução mais recente (via bat, ou cat se indisponível)
+  dolly --view-log|-vl [--dir N]
+                              Escolhe dry-run/prod, escolhe um dos N diretórios de execução
+                              mais recentes (padrão: 5) e mostra um dos arquivos de log daquela
+                              execução (via bat, ou cat se indisponível)
   dolly -h|--help             Mostra esta ajuda
 
   Por padrão cada par roda com ${C_BOLD}rclone copy${C_RESET} (só copia/atualiza, nunca apaga).
@@ -148,8 +151,10 @@ ${C_BOLD}EXEMPLOS${C_RESET}
   dolly -y --bwlimit 1M --transfers 4
   dolly --log-delete
   dolly -lgd 15
-  dolly --view-change-log
-  dolly -vcl
+  dolly --view-log
+  dolly -vl
+  dolly --view-log --dir 10
+  dolly -vl --dir 10
 EOF
 }
 
@@ -181,7 +186,7 @@ PAGER_ARGS=()
 require_pager() {
   if command -v bat >/dev/null 2>&1; then
     PAGER_BIN="bat"
-    PAGER_ARGS=(--language=diff --paging=auto --style=full)
+    PAGER_ARGS=(--paging=auto --style=full)
   else
     PAGER_BIN="cat"
     PAGER_ARGS=()
@@ -291,27 +296,70 @@ cmd_log_delete() {
   fi
 }
 
-# encontra o diretório de execução mais recente dentro de um modo (dry-run
-# ou prod), comparando os nomes dos timestamps (formato %Y%m%d-%H%M%S ordena
-# igual cronologicamente)
-find_latest_run_dir() {
-  local mode_dir="$1" d base latest="" latest_base=""
+# lista os diretórios de execução (timestamps) de um modo (dry-run ou prod),
+# em ordem decrescente (mais recente primeiro); os nomes no formato
+# %Y%m%d-%H%M%S ordenam igual cronologicamente
+list_run_dirs_desc() {
+  local mode_dir="$1" d
   for d in "$mode_dir"/*/; do
     [ -d "$d" ] || continue
-    base="$(basename "$d")"
-    if [ -z "$latest_base" ] || [[ "$base" > "$latest_base" ]]; then
-      latest_base="$base"
-      latest="${d%/}"
-    fi
-  done
-  printf '%s' "$latest"
+    printf '%s\n' "${d%/}"
+  done | sort -r
+}
+
+# mostra até $dir_count diretórios de execução mais recentes do modo escolhido
+# e pede ao usuário para escolher um; devolve o caminho do diretório escolhido
+choose_run_dir() {
+  local mode_dir="$1" dir_count="$2"
+  local dirs=() d
+  while IFS= read -r d; do dirs+=("$d"); done \
+    < <(list_run_dirs_desc "$mode_dir")
+
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    err_box "Nenhuma execução encontrada em $mode_dir." "Rode 'dolly --dry-run' ou 'dolly -y' primeiro."
+    exit 1
+  fi
+
+  local shown=("${dirs[@]:0:dir_count}")
+
+  if [ "${#shown[@]}" -eq 1 ]; then
+    printf '%s' "${shown[0]}"
+    return
+  fi
+
+  {
+    box_top "dolly · view-log"
+    box_line "Execuções mais recentes em $mode_dir"
+    box_line ""
+    local i
+    for i in "${!shown[@]}"; do
+      box_line "$(printf '%2d) %s' "$((i + 1))" "$(basename "${shown[$i]}")")"
+    done
+    box_bottom
+  } >&2
+
+  local reply idx
+  printf 'Escolha o diretório [1-%d]: ' "${#shown[@]}" >&2
+  read -r reply
+  case "$reply" in
+    ''|*[!0-9]*)
+      err_box "Escolha inválida: '$reply'."
+      exit 1
+      ;;
+  esac
+  idx=$((reply - 1))
+  if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#shown[@]}" ]; then
+    err_box "Escolha fora do intervalo: '$reply'."
+    exit 1
+  fi
+  printf '%s' "${shown[$idx]}"
 }
 
 # pergunta ao usuário se quer ver as execuções de dry-run ou de prod;
 # devolve o caminho do diretório do modo escolhido
 choose_log_mode() {
   {
-    box_top "dolly · view-change-log"
+    box_top "dolly · view-log"
     box_line "Qual modo deseja ver?"
     box_line ""
     box_line " 1) dry-run"
@@ -332,45 +380,65 @@ choose_log_mode() {
   esac
 }
 
-# mostra o(s) *.changes.log da execução mais recente do modo escolhido; se
-# houver mais de um (um por job sincronizado), pede ao usuário para escolher qual ver
-cmd_view_change_log() {
+# mostra um dos arquivos de log (*.rclone.log, *.changes.log, summary.log) de
+# uma execução escolhida pelo usuário dentro do modo selecionado (dry-run ou
+# prod); por padrão lista os 5 diretórios de execução mais recentes (ordem
+# decrescente), quantidade ajustável via --dir N
+cmd_view_log() {
+  local dir_count=5
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dir)
+        shift
+        if ! [[ "${1:-}" =~ ^-?[0-9]+$ ]]; then
+          err_box "Valor inválido para --dir: '${1:-}' (deve ser um número inteiro)."
+          exit 1
+        fi
+        dir_count="$1"
+        shift
+        ;;
+      *)
+        err_box "Opção desconhecida para --view-log: '$1'."
+        exit 1
+        ;;
+    esac
+  done
+  if [ "$dir_count" -le 0 ]; then
+    dir_count=5
+  fi
+
   require_pager
 
   local mode_dir
   mode_dir="$(choose_log_mode)"
 
   local run_dir
-  run_dir="$(find_latest_run_dir "$mode_dir")"
-  if [ -z "$run_dir" ]; then
-    err_box "Nenhuma execução encontrada em $mode_dir." "Rode 'dolly --dry-run' ou 'dolly -y' primeiro."
-    exit 1
-  fi
+  run_dir="$(choose_run_dir "$mode_dir" "$dir_count")"
 
-  local clogs=() f
-  while IFS= read -r -d '' f; do clogs+=("$f"); done \
-    < <(find "$run_dir" -maxdepth 1 -name '*.changes.log' -print0 | sort -z)
+  local logs=() f
+  while IFS= read -r -d '' f; do logs+=("$f"); done \
+    < <(find "$run_dir" -maxdepth 1 -type f -name '*.log' -print0 | sort -z)
 
-  if [ "${#clogs[@]}" -eq 0 ]; then
-    err_box "Nenhum changes.log encontrado em $run_dir."
+  if [ "${#logs[@]}" -eq 0 ]; then
+    err_box "Nenhum arquivo de log encontrado em $run_dir."
     exit 1
   fi
 
   local chosen
-  if [ "${#clogs[@]}" -eq 1 ]; then
-    chosen="${clogs[0]}"
+  if [ "${#logs[@]}" -eq 1 ]; then
+    chosen="${logs[0]}"
   else
-    box_top "dolly · view-change-log"
+    box_top "dolly · view-log"
     box_line "Execução: $run_dir"
     box_line ""
     local i
-    for i in "${!clogs[@]}"; do
-      box_line "$(printf '%2d) %s' "$((i + 1))" "$(basename "${clogs[$i]}")")"
+    for i in "${!logs[@]}"; do
+      box_line "$(printf '%2d) %s' "$((i + 1))" "$(basename "${logs[$i]}")")"
     done
     box_bottom
 
     local reply idx
-    printf 'Escolha o arquivo [1-%d]: ' "${#clogs[@]}"
+    printf 'Escolha o arquivo [1-%d]: ' "${#logs[@]}"
     read -r reply
     case "$reply" in
       ''|*[!0-9]*)
@@ -379,14 +447,21 @@ cmd_view_change_log() {
         ;;
     esac
     idx=$((reply - 1))
-    if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#clogs[@]}" ]; then
+    if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#logs[@]}" ]; then
       err_box "Escolha fora do intervalo: '$reply'."
       exit 1
     fi
-    chosen="${clogs[$idx]}"
+    chosen="${logs[$idx]}"
   fi
 
-  "$PAGER_BIN" "${PAGER_ARGS[@]}" "$chosen"
+  local lang_args=()
+  if [ "$PAGER_BIN" = "bat" ]; then
+    case "$chosen" in
+      *.changes.log) lang_args=(--language=diff) ;;
+    esac
+  fi
+
+  "$PAGER_BIN" "${PAGER_ARGS[@]}" "${lang_args[@]}" "$chosen"
 }
 
 # Preenche o array global JOBS com entradas "job|source|destination"
@@ -630,8 +705,9 @@ main() {
       cmd_log_delete "$@"
       return
       ;;
-    --view-change-log|-vcl|-vwcl)
-      cmd_view_change_log
+    --view-log|-vl)
+      shift
+      cmd_view_log "$@"
       return
       ;;
   esac
