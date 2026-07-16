@@ -96,7 +96,7 @@ ${C_BOLD}dolly${C_RESET} - sincroniza diretórios locais com rclone (exclusões 
 
 ${C_BOLD}USO${C_RESET}
   dolly init                  Cria os arquivos de configuração e diretórios de log
-  dolly --dry-run             Simula a sincronização (nada é copiado/apagado)
+  dolly --dry-run|-d          Simula a sincronização (nada é copiado/apagado)
   dolly [-y|--yes]            Executa a sincronização de fato
   dolly --edit-path|-ep       Abre paths.conf no nano
   dolly --edit-filter|-ef     Abre filters.txt no nano
@@ -430,7 +430,7 @@ main() {
   local extra_rclone_args=() arg
   for arg in "$@"; do
     case "$arg" in
-      --dry-run) is_dry_run=1 ;;
+      -d|--dry-run) is_dry_run=1 ;;
       -y|--yes) auto_yes=1 ;;
       *) extra_rclone_args+=("$arg") ;;
     esac

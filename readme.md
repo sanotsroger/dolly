@@ -18,7 +18,7 @@ Requer o binário `rclone` instalado e disponível no `PATH`.
 
 ```sh
 dolly init             # cria os arquivos de configuração e diretórios de log
-dolly --dry-run        # simula a sincronização (nada é copiado/apagado)
+dolly --dry-run        # simula a sincronização (nada é copiado/apagado; atalho: -d)
 dolly                  # executa a sincronização de fato (pede confirmação)
 dolly -y               # executa sem pedir confirmação
 dolly --edit-path      # abre paths.conf no nano (atalho: -ep)
