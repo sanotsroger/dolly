@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dolly - sincroniza diretórios locais com rclone (exclusões + deleção espelhada)
+# dolly - sincroniza diretórios locais com rclone (exclusões; deleção espelhada opcional via --mirror)
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dolly"
@@ -92,18 +92,22 @@ meter_bar() {
 
 usage() {
   cat <<EOF
-${C_BOLD}dolly${C_RESET} - sincroniza diretórios locais com rclone (exclusões + deleção espelhada)
+${C_BOLD}dolly${C_RESET} - sincroniza diretórios locais com rclone (exclusões; deleção espelhada opcional via --mirror)
 
 ${C_BOLD}USO${C_RESET}
   dolly init                  Cria os arquivos de configuração e diretórios de log
   dolly --dry-run|-d          Simula a sincronização (nada é copiado/apagado)
-  dolly [-y|--yes]            Executa a sincronização de fato
+  dolly [-y|--yes]            Executa a sincronização de fato (por padrão, nunca apaga no destino)
+  dolly --mirror|-m           Ativa deleção espelhada: apaga no destino o que não existe mais na origem
   dolly --edit-path|-ep       Abre paths.conf no nano
   dolly --edit-filter|-ef     Abre filters.txt no nano
   dolly -h|--help             Mostra esta ajuda
 
+  Por padrão cada par roda com ${C_BOLD}rclone copy${C_RESET} (só copia/atualiza, nunca apaga).
+  Com --mirror/-m, roda ${C_BOLD}rclone sync${C_RESET} (espelha a origem, apagando extras no destino).
+
   Qualquer outra flag não reconhecida (ex.: --bwlimit 1M, --transfers 8,
-  --exclude "*.tmp") é repassada direto para o ${C_BOLD}rclone sync${C_RESET} de cada par.
+  --exclude "*.tmp") é repassada direto para o rclone de cada par.
 
 ${C_BOLD}CONFIGURAÇÃO${C_RESET}
   $PATHS_FILE
@@ -123,12 +127,14 @@ ${C_BOLD}LOGS${C_RESET}
   Para cada par sincronizado, dois arquivos são gerados:
     <job>.rclone.log    saída técnica detalhada do rclone (-v)
     <job>.changes.log   lista estilo git status (+ adicionado, * modificado, - removido)
+                        "- removido" só aparece em execuções com --mirror
   Além de um summary.log com o resumo agregado de todos os pares.
 
 ${C_BOLD}EXEMPLOS${C_RESET}
   dolly init
   dolly --dry-run
   dolly -y
+  dolly -y --mirror
   dolly --edit-path
   dolly -y --bwlimit 1M --transfers 4
 EOF
@@ -254,6 +260,7 @@ load_paths() {
 
 run_sync() {
   local is_dry_run="$1"; shift
+  local is_mirror="$1"; shift
   local extra_rclone_args=("$@")
   require_rclone
   load_paths
@@ -270,9 +277,11 @@ run_sync() {
   [ -f "$FILTERS_FILE" ] && filter_args=(--filter-from "$FILTERS_FILE")
 
   local total_add=0 total_mod=0 total_del=0 any_failed=0
+  local mirror_label="não"
+  [ "$is_mirror" = "1" ] && mirror_label="sim"
   local summary_file="$run_dir/summary.log"
   {
-    echo "dolly run - $timestamp - modo: $mode_dir"
+    echo "dolly run - $timestamp - modo: $mode_dir - mirror: $mirror_label"
     echo
   } > "$summary_file"
 
@@ -282,6 +291,8 @@ run_sync() {
   box_top "dolly · $mode_label"
   box_line "Logs desta execução: $run_dir"
   [ "${#extra_rclone_args[@]}" -gt 0 ] && box_line "Flags extras: ${extra_rclone_args[*]}"
+  [ "$is_mirror" = "1" ] && box_line "⚠ modo --mirror: arquivos removidos na origem serão apagados no destino" \
+    "$(printf '%s⚠ modo --mirror: arquivos removidos na origem serão apagados no destino%s' "$C_YELLOW" "$C_RESET")"
   box_bottom
 
   local entry job rest src dst rlog clog combined_raw rc_args status added modified removed cline
@@ -301,8 +312,11 @@ run_sync() {
 
     mkdir -p "$dst"
 
+    local rclone_subcmd="copy"
+    [ "$is_mirror" = "1" ] && rclone_subcmd="sync"
+
     combined_raw="$run_dir/.$job.combined.raw"
-    rc_args=(sync "$src" "$dst" "${filter_args[@]}" --create-empty-src-dirs -v \
+    rc_args=("$rclone_subcmd" "$src" "$dst" "${filter_args[@]}" --create-empty-src-dirs -v \
       --log-file "$rlog" --combined "$combined_raw")
     [ "$is_dry_run" = "1" ] && rc_args+=(--dry-run)
     [ "${#extra_rclone_args[@]}" -gt 0 ] && rc_args+=("${extra_rclone_args[@]}")
@@ -312,7 +326,13 @@ run_sync() {
 
     # --combined lista TODOS os arquivos, incluindo "= " (inalterados);
     # mantemos em changes.log só o que de fato mudou (estilo git status).
-    grep -E '^[+*-] ' "$combined_raw" > "$clog" 2>/dev/null || true
+    # Fora do modo --mirror usamos "rclone copy", que nunca apaga nada; o
+    # relatório ainda marca arquivos só-no-destino com "- ", mas como o
+    # rclone escolheu não tocá-los isso não é uma mudança real, então
+    # tratamos "- " como "= " (ignorado) a menos que --mirror esteja ativo.
+    local combined_pattern='^[+*] '
+    [ "$is_mirror" = "1" ] && combined_pattern='^[+*-] '
+    grep -E "$combined_pattern" "$combined_raw" > "$clog" 2>/dev/null || true
     rm -f "$combined_raw"
 
     added="$(grep -c '^+ ' "$clog" 2>/dev/null || true)"
@@ -356,8 +376,9 @@ run_sync() {
         esac
       done < <(head -n "$MAX_CHANGE_LINES" "$clog")
       if [ "$total_lines" -gt "$MAX_CHANGE_LINES" ]; then
-        box_line "$(printf '… e mais %d alterações (ver %s)' "$((total_lines - MAX_CHANGE_LINES))" "$clog")"
+        box_line "$(printf '… e mais %d alterações' "$((total_lines - MAX_CHANGE_LINES))")"
       fi
+      box_line "$(printf '→ ver %s' "$clog")" "$(printf '%s→ ver %s%s' "$C_DIM" "$clog" "$C_RESET")"
     fi
     box_bottom
 
@@ -399,7 +420,12 @@ run_sync() {
 }
 
 confirm_prod() {
-  printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade e apagar no destino os arquivos que não existirem mais na origem. Continuar? [y/N] "
+  local is_mirror="$1"
+  if [ "$is_mirror" = "1" ]; then
+    printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade e apagar no destino os arquivos que não existirem mais na origem. Continuar? [y/N] "
+  else
+    printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade (nada será apagado no destino; use --mirror para espelhar remoções). Continuar? [y/N] "
+  fi
   local reply
   read -r reply
   case "$reply" in
@@ -430,20 +456,21 @@ main() {
 
   # flags próprias do dolly são consumidas aqui; qualquer outro argumento é
   # repassado como flag nativa do rclone (ex.: --bwlimit 1M, --transfers 8).
-  local is_dry_run=0 auto_yes=0
+  local is_dry_run=0 auto_yes=0 is_mirror=0
   local extra_rclone_args=() arg
   for arg in "$@"; do
     case "$arg" in
       -d|--dry-run) is_dry_run=1 ;;
       -y|--yes) auto_yes=1 ;;
+      -m|--mirror) is_mirror=1 ;;
       *) extra_rclone_args+=("$arg") ;;
     esac
   done
 
   if [ "$is_dry_run" -eq 0 ] && [ "$auto_yes" -eq 0 ]; then
-    confirm_prod
+    confirm_prod "$is_mirror"
   fi
-  run_sync "$is_dry_run" "${extra_rclone_args[@]}"
+  run_sync "$is_dry_run" "$is_mirror" "${extra_rclone_args[@]}"
 }
 
 main "$@"
