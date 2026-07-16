@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# dolly - sincroniza diretórios locais com rclone (exclusões + deleção espelhada)
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dolly"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dolly"
+PATHS_FILE="$CONFIG_DIR/paths.conf"
+FILTERS_FILE="$CONFIG_DIR/filters.txt"
+LOGS_DIR="$DATA_DIR/logs"
+
+SCRIPT_NAME="dolly"
+
+# ---------- cores (desativadas se a saída não for um terminal) ----------
+if [ -t 1 ]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'; C_CYAN=$'\033[36m'
+else
+  C_RESET=''; C_BOLD=''; C_DIM=''
+  C_RED=''; C_GREEN=''; C_YELLOW=''
+  C_BLUE=''; C_CYAN=''
+fi
+
+info()    { printf '%s\n' "${C_BLUE}➜${C_RESET} $*"; }
+ok()      { printf '%s\n' "${C_GREEN}✔${C_RESET} $*"; }
+warn()    { printf '%s\n' "${C_YELLOW}⚠${C_RESET} $*"; }
+err()     { printf '%s\n' "${C_RED}✖${C_RESET} $*" >&2; }
+heading() { printf '\n%s\n' "${C_BOLD}${C_CYAN}$*${C_RESET}"; }
+
+usage() {
+  cat <<EOF
+${C_BOLD}dolly${C_RESET} - sincroniza diretórios locais com rclone (exclusões + deleção espelhada)
+
+${C_BOLD}USO${C_RESET}
+  dolly init            Cria os arquivos de configuração e diretórios de log
+  dolly --dry-run       Simula a sincronização (nada é copiado/apagado)
+  dolly [-y|--yes]      Executa a sincronização de fato
+  dolly -h|--help       Mostra esta ajuda
+
+${C_BOLD}CONFIGURAÇÃO${C_RESET}
+  $PATHS_FILE
+      Pares "source|destination", um por linha. Linhas em branco e
+      iniciadas com # são ignoradas.
+
+  $FILTERS_FILE
+      Regras de exclusão no formato --filter-from do rclone.
+      Ex.: - .git/**
+           - node_modules/**
+           - *.tmp
+
+${C_BOLD}LOGS${C_RESET}
+  $LOGS_DIR/dry-run/<timestamp>/   logs das simulações
+  $LOGS_DIR/prod/<timestamp>/      logs das execuções reais
+
+  Para cada par sincronizado, dois arquivos são gerados:
+    <job>.rclone.log    saída técnica detalhada do rclone (-v)
+    <job>.changes.log   lista estilo git status (+ adicionado, * modificado, - removido)
+  Além de um summary.log com o resumo agregado de todos os pares.
+
+${C_BOLD}EXEMPLOS${C_RESET}
+  dolly init
+  dolly --dry-run
+  dolly -y
+EOF
+}
+
+require_rclone() {
+  if ! command -v rclone >/dev/null 2>&1; then
+    err "rclone não encontrado no PATH. Instale-o antes de continuar (https://rclone.org/downloads/)."
+    exit 1
+  fi
+}
+
+cmd_init() {
+  mkdir -p "$CONFIG_DIR" "$LOGS_DIR/dry-run" "$LOGS_DIR/prod"
+  ok "Diretórios criados em $CONFIG_DIR e $LOGS_DIR"
+
+  if [ -f "$PATHS_FILE" ]; then
+    warn "$PATHS_FILE já existe, mantendo como está"
+  else
+    cat > "$PATHS_FILE" <<'EOF'
+# dolly - pares de sincronização
+# Formato: source|destination  (um par por linha)
+# Linhas em branco ou iniciadas com # são ignoradas.
+/home/sanotsroger/Downloads/dolly/source/dir_app|/home/sanotsroger/Downloads/dolly/destination/src/dir_app
+/home/sanotsroger/Downloads/dolly/source/dir_test|/home/sanotsroger/Downloads/dolly/destination/src/other/dir_test
+EOF
+    ok "Criado $PATHS_FILE"
+  fi
+
+  if [ -f "$FILTERS_FILE" ]; then
+    warn "$FILTERS_FILE já existe, mantendo como está"
+  else
+    cat > "$FILTERS_FILE" <<'EOF'
+# dolly - regras de exclusão (formato --filter-from do rclone)
+# Descomente/adicione linhas "- padrao" para excluir arquivos/diretórios.
+# - .git/**
+# - node_modules/**
+# - *.tmp
+# - *.log
+# - .DS_Store
+EOF
+    ok "Criado $FILTERS_FILE"
+  fi
+
+  echo
+  info "Edite os arquivos acima e depois rode: ${C_BOLD}dolly --dry-run${C_RESET}"
+}
+
+# Preenche o array global JOBS com entradas "job|source|destination"
+load_paths() {
+  JOBS=()
+  if [ ! -f "$PATHS_FILE" ]; then
+    err "Arquivo de configuração não encontrado: $PATHS_FILE"
+    err "Rode '${SCRIPT_NAME} init' primeiro."
+    exit 1
+  fi
+
+  local line src dst job
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+
+    src="${line%%|*}"
+    dst="${line#*|}"
+    if [ "$src" = "$line" ] || [ -z "$dst" ]; then
+      warn "Linha inválida em $PATHS_FILE, ignorando: $line"
+      continue
+    fi
+    if [ ! -d "$src" ]; then
+      warn "Diretório de origem não existe, ignorando job: $src"
+      continue
+    fi
+    job="$(basename -- "$dst")"
+    JOBS+=("$job|$src|$dst")
+  done < "$PATHS_FILE"
+
+  if [ "${#JOBS[@]}" -eq 0 ]; then
+    err "Nenhum par válido em $PATHS_FILE."
+    exit 1
+  fi
+}
+
+run_sync() {
+  local is_dry_run="$1"
+  require_rclone
+  load_paths
+
+  local mode_dir="prod"
+  [ "$is_dry_run" = "1" ] && mode_dir="dry-run"
+
+  local timestamp run_dir
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  run_dir="$LOGS_DIR/$mode_dir/$timestamp"
+  mkdir -p "$run_dir"
+
+  local filter_args=()
+  [ -f "$FILTERS_FILE" ] && filter_args=(--filter-from "$FILTERS_FILE")
+
+  local total_add=0 total_mod=0 total_del=0 any_failed=0
+  local summary_file="$run_dir/summary.log"
+  {
+    echo "dolly run - $timestamp - modo: $mode_dir"
+    echo
+  } > "$summary_file"
+
+  if [ "$is_dry_run" = "1" ]; then
+    heading "dolly (dry-run)"
+  else
+    heading "dolly (execução real)"
+  fi
+  info "Logs desta execução: $run_dir"
+
+  local entry job rest src dst rlog clog combined_raw rc_args status added modified removed cline
+  local stats_bytes stats_elapsed
+  for entry in "${JOBS[@]}"; do
+    job="${entry%%|*}"
+    rest="${entry#*|}"
+    src="${rest%%|*}"
+    dst="${rest#*|}"
+
+    rlog="$run_dir/$job.rclone.log"
+    clog="$run_dir/$job.changes.log"
+
+    heading "→ $job"
+    printf '  %s📂 %s%s\n' "$C_DIM" "$src" "$C_RESET"
+    printf '  %s💾 %s%s\n' "$C_DIM" "$dst" "$C_RESET"
+
+    mkdir -p "$dst"
+
+    combined_raw="$run_dir/.$job.combined.raw"
+    rc_args=(sync "$src" "$dst" "${filter_args[@]}" --create-empty-src-dirs -v \
+      --log-file "$rlog" --combined "$combined_raw")
+    [ "$is_dry_run" = "1" ] && rc_args+=(--dry-run)
+
+    status=0
+    rclone "${rc_args[@]}" || status=$?
+
+    # --combined lista TODOS os arquivos, incluindo "= " (inalterados);
+    # mantemos em changes.log só o que de fato mudou (estilo git status).
+    grep -E '^[+*-] ' "$combined_raw" > "$clog" 2>/dev/null || true
+    rm -f "$combined_raw"
+
+    added="$(grep -c '^+ ' "$clog" 2>/dev/null || true)"
+    modified="$(grep -c '^\* ' "$clog" 2>/dev/null || true)"
+    removed="$(grep -c '^- ' "$clog" 2>/dev/null || true)"
+    added=${added:-0}; modified=${modified:-0}; removed=${removed:-0}
+
+    if [ "$status" -ne 0 ]; then
+      err "$job falhou (rclone exit $status) - veja $rlog"
+      any_failed=1
+    else
+      ok "$job concluído — ${C_GREEN}+$added${C_RESET} ${C_YELLOW}~$modified${C_RESET} ${C_RED}-$removed${C_RESET}"
+    fi
+
+    # rclone grava "Transferred:"/"Elapsed time:" com espaçamento inconsistente
+    # (tab numa linha, espaços na outra); realinhamos nós mesmos ao exibir.
+    stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
+    stats_elapsed="$(grep -E '^Elapsed time:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Elapsed time:[[:space:]]*//')"
+    if [ -n "$stats_bytes" ]; then
+      printf '  %s%-14s%s%s\n' "$C_DIM" "Transferred:" "$C_RESET" "$stats_bytes"
+    fi
+    if [ -n "$stats_elapsed" ]; then
+      printf '  %s%-14s%s%s\n' "$C_DIM" "Elapsed time:" "$C_RESET" "$stats_elapsed"
+    fi
+
+    if [ -s "$clog" ]; then
+      while IFS= read -r cline; do
+        case "$cline" in
+          '+ '*) printf '    %s%s%s\n' "$C_GREEN" "$cline" "$C_RESET" ;;
+          '* '*) printf '    %s%s%s\n' "$C_YELLOW" "$cline" "$C_RESET" ;;
+          '- '*) printf '    %s%s%s\n' "$C_RED" "$cline" "$C_RESET" ;;
+          *) printf '    %s\n' "$cline" ;;
+        esac
+      done < "$clog"
+    fi
+
+    {
+      echo "## $job"
+      echo "source: $src"
+      echo "destination: $dst"
+      echo "adicionados: $added  modificados: $modified  removidos: $removed"
+      echo
+      cat "$clog" 2>/dev/null
+      echo
+    } >> "$summary_file"
+
+    total_add=$((total_add + added))
+    total_mod=$((total_mod + modified))
+    total_del=$((total_del + removed))
+  done
+
+  heading "Resumo"
+  printf '  %s+%s%s adicionados   %s~%s%s modificados   %s-%s%s removidos\n' \
+    "$C_GREEN" "$total_add" "$C_RESET" "$C_YELLOW" "$total_mod" "$C_RESET" "$C_RED" "$total_del" "$C_RESET"
+  info "Logs completos em: $run_dir"
+
+  {
+    echo "## Totais"
+    echo "adicionados: $total_add  modificados: $total_mod  removidos: $total_del"
+  } >> "$summary_file"
+
+  if [ "$any_failed" -ne 0 ]; then
+    err "Um ou mais jobs falharam."
+    exit 1
+  fi
+}
+
+confirm_prod() {
+  printf '%s' "${C_YELLOW}⚠${C_RESET} Isso vai sincronizar de verdade e apagar no destino os arquivos que não existirem mais na origem. Continuar? [y/N] "
+  local reply
+  read -r reply
+  case "$reply" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) info "Cancelado."; exit 0 ;;
+  esac
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    init)
+      cmd_init
+      ;;
+    --dry-run)
+      run_sync 1
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    ""|-y|--yes)
+      if [ "$cmd" != "-y" ] && [ "$cmd" != "--yes" ]; then
+        confirm_prod
+      fi
+      run_sync 0
+      ;;
+    *)
+      err "Opção desconhecida: $cmd"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
