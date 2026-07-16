@@ -101,6 +101,7 @@ ${C_BOLD}USO${C_RESET}
   dolly --mirror|-m           Ativa deleção espelhada: apaga no destino o que não existe mais na origem
   dolly --edit-path|-ep       Abre paths.conf no nano
   dolly --edit-filter|-ef     Abre filters.txt no nano
+  dolly --log-delete|-lgd [N] Apaga execuções (dry-run e prod) com mais de N dias (padrão: 30)
   dolly -h|--help             Mostra esta ajuda
 
   Por padrão cada par roda com ${C_BOLD}rclone copy${C_RESET} (só copia/atualiza, nunca apaga).
@@ -137,6 +138,8 @@ ${C_BOLD}EXEMPLOS${C_RESET}
   dolly -y --mirror
   dolly --edit-path
   dolly -y --bwlimit 1M --transfers 4
+  dolly --log-delete
+  dolly -lgd 15
 EOF
 }
 
@@ -222,6 +225,39 @@ cmd_edit_filter() {
   ensure_filters_file || true
   require_nano
   nano "$FILTERS_FILE"
+}
+
+# apaga diretórios de execução (dry-run e prod) com mais de N dias
+cmd_log_delete() {
+  local days="${1:-30}"
+  case "$days" in
+    ''|*[!0-9]*)
+      err_box "Valor inválido para --log-delete: '$days' (deve ser um número inteiro de dias)."
+      exit 1
+      ;;
+  esac
+
+  local dirs=("$LOGS_DIR/dry-run" "$LOGS_DIR/prod") d target
+  local total_deleted=0
+
+  box_top "dolly · log-delete"
+  box_line "Removendo execuções com mais de $days dia(s) em $LOGS_DIR"
+  box_bottom
+
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r -d '' target; do
+      info "removendo $target"
+      rm -rf -- "$target"
+      total_deleted=$((total_deleted + 1))
+    done < <(find "$d" -mindepth 1 -maxdepth 1 -type d -mtime "+$days" -print0)
+  done
+
+  if [ "$total_deleted" -eq 0 ]; then
+    ok "Nenhuma execução com mais de $days dia(s) encontrada."
+  else
+    ok "$total_deleted execução(ões) removida(s)."
+  fi
 }
 
 # Preenche o array global JOBS com entradas "job|source|destination"
@@ -450,6 +486,11 @@ main() {
       ;;
     --edit-filter|-ef)
       cmd_edit_filter
+      return
+      ;;
+    --log-delete|-lgd)
+      shift
+      cmd_log_delete "$@"
       return
       ;;
   esac
