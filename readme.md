@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="240" alt="Logo do Dolly: uma ovelha com um selo de clonagem" />
+<img src="assets/logo.png" width="240" alt="Logo do Dolly: uma ovelha com um selo de clonagem" />
 
 # dolly
 
@@ -86,6 +86,28 @@ Depois de `dolly init`, edite:
 |---|---|
 | `~/.config/dolly/paths.conf` | Pares `source\|destination`, um por linha |
 | `~/.config/dolly/filters.txt` | Regras de exclusão no formato [`--filter-from`](https://rclone.org/filtering/) do rclone (ex.: `- .git/**`) |
+
+### Variáveis e seções em `paths.conf`
+
+Além de pares `source|destination`, o arquivo aceita:
+
+- `$VAR` / `${VAR}` e `~` (home) — expandidos em qualquer path, inclusive contra variáveis de ambiente.
+- `NOME=valor` — define uma variável reutilizável nos paths abaixo dela.
+- `[seção]` — agrupa pares e **reseta** as variáveis definidas dentro da seção anterior. Variáveis definidas antes da primeira seção são globais e ficam visíveis em todas as seções.
+
+```conf
+ROOT=/home/sanotsroger/Downloads/dolly
+
+[app]
+SRC=$ROOT/source
+DST=$ROOT/destination
+$SRC/dir_app|$DST/src/dir_app
+
+[test]
+SRC=$ROOT/source
+DST=$ROOT/destination
+$SRC/dir_test|$DST/src/other/dir_test
+```
 
 ## 🗂️ Logs
 

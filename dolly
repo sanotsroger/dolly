@@ -125,6 +125,14 @@ ${C_BOLD}CONFIGURAÇÃO${C_RESET}
   $PATHS_FILE
       Pares "source|destination", um por linha. Linhas em branco e
       iniciadas com # são ignoradas.
+      Suporta \$VAR, \${VAR}, ~ (home) e variáveis de ambiente nos
+      paths. "NOME=valor" define uma variável; "[seção]" agrupa
+      pares e reseta as variáveis definidas dentro dela (variáveis
+      antes da primeira seção são globais). Ex.:
+        ROOT=/home/user/dolly
+        [app]
+        SRC=\$ROOT/source
+        \$SRC/dir_app|\$ROOT/destination/dir_app
 
   $FILTERS_FILE
       Regras de exclusão no formato --filter-from do rclone.
@@ -202,6 +210,25 @@ ensure_paths_file() {
 # dolly - pares de sincronização
 # Formato: source|destination  (um par por linha)
 # Linhas em branco ou iniciadas com # são ignoradas.
+#
+# Variáveis: NOME=valor define uma variável reutilizável nos paths
+# abaixo com $NOME ou ${NOME}. Também é possível usar variáveis de
+# ambiente e "~" (home).
+# Variáveis definidas antes da primeira [seção] são globais (valem
+# em todas as seções); dentro de uma [seção] elas só valem para as
+# linhas dessa seção e são resetadas na seção seguinte. Exemplo:
+#
+# ROOT=/home/sanotsroger/Downloads/dolly
+#
+# [app]
+# SRC=$ROOT/source
+# DST=$ROOT/destination
+# $SRC/dir_app|$DST/src/dir_app
+#
+# [test]
+# SRC=$ROOT/source
+# DST=$ROOT/destination
+# $SRC/dir_test|$DST/src/other/dir_test
 /home/sanotsroger/Downloads/dolly/source/dir_app|/home/sanotsroger/Downloads/dolly/destination/src/dir_app
 /home/sanotsroger/Downloads/dolly/source/dir_test|/home/sanotsroger/Downloads/dolly/destination/src/other/dir_test
 EOF
@@ -480,7 +507,13 @@ expand_path() {
   while [[ "$rest" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*) ]]; do
     match="${BASH_REMATCH[0]}"
     name="${BASH_REMATCH[1]:-${BASH_REMATCH[2]}}"
-    value="${!name-}"
+    if [ -n "${SECTION_VARS[$name]+x}" ]; then
+      value="${SECTION_VARS[$name]}"
+    elif [ -n "${GLOBAL_VARS[$name]+x}" ]; then
+      value="${GLOBAL_VARS[$name]}"
+    else
+      value="${!name-}"
+    fi
     result+="${rest%%"$match"*}$value"
     rest="${rest#*"$match"}"
   done
@@ -492,16 +525,34 @@ expand_path() {
 # Preenche o array global JOBS com entradas "job|source|destination"
 load_paths() {
   JOBS=()
+  declare -gA GLOBAL_VARS=() SECTION_VARS=()
   if [ ! -f "$PATHS_FILE" ]; then
     err_box "Arquivo de configuração não encontrado: $PATHS_FILE" "Rode '${SCRIPT_NAME} init' primeiro."
     exit 1
   fi
 
-  local line raw_src raw_dst src dst job
+  local line raw_src raw_dst src dst job name value in_section=0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     [ -z "$line" ] && continue
     case "$line" in \#*) continue ;; esac
+
+    if [[ "$line" =~ ^\[[A-Za-z0-9_.-]+\]$ ]]; then
+      SECTION_VARS=()
+      in_section=1
+      continue
+    fi
+
+    if [[ "$line" != *'|'* ]] && [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      value="$(expand_path "${BASH_REMATCH[2]}")"
+      if [ "$in_section" -eq 1 ]; then
+        SECTION_VARS["$name"]="$value"
+      else
+        GLOBAL_VARS["$name"]="$value"
+      fi
+      continue
+    fi
 
     raw_src="${line%%|*}"
     raw_dst="${line#*|}"
