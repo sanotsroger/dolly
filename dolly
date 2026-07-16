@@ -106,10 +106,10 @@ ${C_BOLD}USO${C_RESET}
   dolly --dry-run|-d          Simula a sincronização (nada é copiado/apagado)
   dolly [-y|--yes]            Executa a sincronização de fato (por padrão, nunca apaga no destino)
   dolly --mirror|-m           Ativa deleção espelhada: apaga no destino o que não existe mais na origem
-  dolly --edit-path|-ep       Abre paths.conf no nano
-  dolly --edit-filter|-ef     Abre filters.txt no nano
+  dolly --edit-path|-ep       Abre paths.conf no editor disponível (nano, vim ou vi)
+  dolly --edit-filter|-ef     Abre filters.txt no editor disponível (nano, vim ou vi)
   dolly --log-delete|-lgd [N] Apaga execuções (dry-run e prod) com mais de N dias (padrão: 30)
-  dolly --view-change-log|-vcl|-vwcl Escolhe dry-run/prod e mostra o(s) changes.log da execução mais recente (via bat)
+  dolly --view-change-log|-vcl|-vwcl Escolhe dry-run/prod e mostra o(s) changes.log da execução mais recente (via bat, ou cat se indisponível)
   dolly -h|--help             Mostra esta ajuda
 
   Por padrão cada par roda com ${C_BOLD}rclone copy${C_RESET} (só copia/atualiza, nunca apaga).
@@ -160,17 +160,31 @@ require_rclone() {
   fi
 }
 
-require_nano() {
-  if ! command -v nano >/dev/null 2>&1; then
-    err_box "nano não encontrado no PATH. Instale-o ou edite o arquivo manualmente."
+EDITOR_BIN=""
+
+require_editor() {
+  if command -v nano >/dev/null 2>&1; then
+    EDITOR_BIN="nano"
+  elif command -v vim >/dev/null 2>&1; then
+    EDITOR_BIN="vim"
+  elif command -v vi >/dev/null 2>&1; then
+    EDITOR_BIN="vi"
+  else
+    err_box "Nenhum editor de texto compatível encontrado no PATH (nano, vim ou vi)." "Instale um deles ou edite o arquivo manualmente."
     exit 1
   fi
 }
 
-require_bat() {
-  if ! command -v bat >/dev/null 2>&1; then
-    err_box "bat não encontrado no PATH. Instale-o (cargo install bat) para visualizar os changes.log."
-    exit 1
+PAGER_BIN=""
+PAGER_ARGS=()
+
+require_pager() {
+  if command -v bat >/dev/null 2>&1; then
+    PAGER_BIN="bat"
+    PAGER_ARGS=(--language=diff --paging=auto --style=full)
+  else
+    PAGER_BIN="cat"
+    PAGER_ARGS=()
   fi
 }
 
@@ -233,15 +247,15 @@ cmd_init() {
 cmd_edit_path() {
   mkdir -p "$CONFIG_DIR"
   ensure_paths_file || true
-  require_nano
-  nano "$PATHS_FILE"
+  require_editor
+  "$EDITOR_BIN" "$PATHS_FILE"
 }
 
 cmd_edit_filter() {
   mkdir -p "$CONFIG_DIR"
   ensure_filters_file || true
-  require_nano
-  nano "$FILTERS_FILE"
+  require_editor
+  "$EDITOR_BIN" "$FILTERS_FILE"
 }
 
 # apaga diretórios de execução (dry-run e prod) com mais de N dias
@@ -321,7 +335,7 @@ choose_log_mode() {
 # mostra o(s) *.changes.log da execução mais recente do modo escolhido; se
 # houver mais de um (um por job sincronizado), pede ao usuário para escolher qual ver
 cmd_view_change_log() {
-  require_bat
+  require_pager
 
   local mode_dir
   mode_dir="$(choose_log_mode)"
@@ -372,7 +386,7 @@ cmd_view_change_log() {
     chosen="${clogs[$idx]}"
   fi
 
-  bat --language=diff --paging=auto --style=full "$chosen"
+  "$PAGER_BIN" "${PAGER_ARGS[@]}" "$chosen"
 }
 
 # Preenche o array global JOBS com entradas "job|source|destination"
