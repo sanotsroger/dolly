@@ -78,16 +78,23 @@ err_box() {
   } >&2
 }
 
-# barra estilo medidor do btop: label, valor, total, cor
+# barra estilo medidor do btop: label, valor, total, cor, largura reservada pro valor
+# a barra ocupa todo o espaço horizontal disponível na caixa, deixando só o
+# necessário no final para o número (alinhado à direita e com largura fixa
+# entre as três barras, para elas ficarem alinhadas).
 meter_bar() {
-  local label="$1" value="$2" total="$3" color="$4" width=20 filled=0 empty bar=""
+  local label="$1" value="$2" total="$3" color="$4" value_width="${5:-1}"
+  local label_width=11 avail width filled=0 empty bar=""
+  avail=$((BOX_WIDTH - 4))
+  width=$((avail - label_width - 1 - 1 - value_width))
+  [ "$width" -lt 1 ] && width=1
   [ "$total" -gt 0 ] && filled=$(( value * width / total ))
   [ "$filled" -gt "$width" ] && filled=$width
   empty=$((width - filled))
   [ "$filled" -gt 0 ] && bar="$(printf '█%.0s' $(seq 1 "$filled"))"
   [ "$empty" -gt 0 ] && bar="${bar}$(printf '░%.0s' $(seq 1 "$empty"))"
-  box_line "$(printf '%-11s %s %s' "$label" "$bar" "$value")" \
-    "$(printf '%-11s %s%s%s %s' "$label" "$color" "$bar" "$C_RESET" "$value")"
+  box_line "$(printf '%-11s %s %*s' "$label" "$bar" "$value_width" "$value")" \
+    "$(printf '%-11s %s%s%s %*s' "$label" "$color" "$bar" "$C_RESET" "$value_width" "$value")"
 }
 
 usage() {
@@ -388,6 +395,8 @@ run_sync() {
           "$C_GREEN" "$C_RESET" "$C_GREEN" "$added" "$C_RESET" "$C_YELLOW" "$modified" "$C_RESET" "$C_RED" "$removed" "$C_RESET")"
     fi
 
+    box_line ""
+
     # rclone grava "Transferred:"/"Elapsed time:" com espaçamento inconsistente
     # (tab numa linha, espaços na outra); realinhamos nós mesmos ao exibir.
     stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//' || true)"
@@ -434,12 +443,14 @@ run_sync() {
   done
 
   local grand_total=$((total_add + total_mod + total_del))
+  local value_width=${#grand_total}
+  [ "$value_width" -lt 1 ] && value_width=1
   box_top "Resumo"
   box_line "$(printf '%s pares processados · %s alterações' "${#JOBS[@]}" "$grand_total")"
   box_line ""
-  meter_bar "adicionados" "$total_add" "$grand_total" "$C_GREEN"
-  meter_bar "modificados" "$total_mod" "$grand_total" "$C_YELLOW"
-  meter_bar "removidos"   "$total_del" "$grand_total" "$C_RED"
+  meter_bar "adicionados" "$total_add" "$grand_total" "$C_GREEN"  "$value_width"
+  meter_bar "modificados" "$total_mod" "$grand_total" "$C_YELLOW" "$value_width"
+  meter_bar "removidos"   "$total_del" "$grand_total" "$C_RED"    "$value_width"
   box_line ""
   box_line "Logs completos em: $run_dir"
   box_bottom
