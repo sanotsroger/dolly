@@ -25,17 +25,86 @@ info()    { printf '%s\n' "${C_BLUE}➜${C_RESET} $*"; }
 ok()      { printf '%s\n' "${C_GREEN}✔${C_RESET} $*"; }
 warn()    { printf '%s\n' "${C_YELLOW}⚠${C_RESET} $*"; }
 err()     { printf '%s\n' "${C_RED}✖${C_RESET} $*" >&2; }
-heading() { printf '\n%s\n' "${C_BOLD}${C_CYAN}$*${C_RESET}"; }
+
+# ---------- painéis com bordas unicode (inspirado em btop/gh-dash) ----------
+BOX_WIDTH="$(tput cols 2>/dev/null || echo 80)"
+[ -z "$BOX_WIDTH" ] && BOX_WIDTH=80
+[ "$BOX_WIDTH" -gt 96 ] && BOX_WIDTH=96
+[ "$BOX_WIDTH" -lt 44 ] && BOX_WIDTH=44
+MAX_CHANGE_LINES=12
+
+box_top() {
+  local title="$1" color="${2:-$C_CYAN}" n
+  n=$(( BOX_WIDTH - 5 - ${#title} ))
+  [ "$n" -lt 1 ] && n=1
+  printf '%s╭─ %s%s%s ' "$color" "$C_RESET$C_BOLD" "$title" "$C_RESET$color"
+  printf -- '─%.0s' $(seq 1 "$n")
+  printf '╮%s\n' "$C_RESET"
+}
+
+box_bottom() {
+  local color="${1:-$C_CYAN}"
+  printf '%s╰' "$color"
+  printf -- '─%.0s' $(seq 1 $((BOX_WIDTH - 2)))
+  printf '╯%s\n' "$C_RESET"
+}
+
+box_divider() {
+  printf '%s├' "$C_CYAN"
+  printf -- '─%.0s' $(seq 1 $((BOX_WIDTH - 2)))
+  printf '┤%s\n' "$C_RESET"
+}
+
+# $1 texto puro (usado para medir/truncar), $2 texto com cores para exibir (opcional), $3 cor da borda (opcional)
+box_line() {
+  local plain="$1" printed="${2:-$1}" color="${3:-$C_CYAN}" avail pad
+  avail=$((BOX_WIDTH - 4))
+  if [ "${#plain}" -gt "$avail" ]; then
+    plain="${plain:0:avail-1}…"
+    printed="$plain"
+  fi
+  pad=$((avail - ${#plain}))
+  printf '%s│%s %s%*s %s│%s\n' "$color" "$C_RESET" "$printed" "$pad" "" "$color" "$C_RESET"
+}
+
+# painel vermelho para erros fatais: um ou mais argumentos, uma linha cada
+err_box() {
+  local msg
+  {
+    box_top "erro" "$C_RED"
+    for msg in "$@"; do
+      box_line "✖ $msg" "" "$C_RED"
+    done
+    box_bottom "$C_RED"
+  } >&2
+}
+
+# barra estilo medidor do btop: label, valor, total, cor
+meter_bar() {
+  local label="$1" value="$2" total="$3" color="$4" width=20 filled=0 empty bar=""
+  [ "$total" -gt 0 ] && filled=$(( value * width / total ))
+  [ "$filled" -gt "$width" ] && filled=$width
+  empty=$((width - filled))
+  [ "$filled" -gt 0 ] && bar="$(printf '█%.0s' $(seq 1 "$filled"))"
+  [ "$empty" -gt 0 ] && bar="${bar}$(printf '░%.0s' $(seq 1 "$empty"))"
+  box_line "$(printf '%-11s %s %s' "$label" "$bar" "$value")" \
+    "$(printf '%-11s %s%s%s %s' "$label" "$color" "$bar" "$C_RESET" "$value")"
+}
 
 usage() {
   cat <<EOF
 ${C_BOLD}dolly${C_RESET} - sincroniza diretórios locais com rclone (exclusões + deleção espelhada)
 
 ${C_BOLD}USO${C_RESET}
-  dolly init            Cria os arquivos de configuração e diretórios de log
-  dolly --dry-run       Simula a sincronização (nada é copiado/apagado)
-  dolly [-y|--yes]      Executa a sincronização de fato
-  dolly -h|--help       Mostra esta ajuda
+  dolly init                  Cria os arquivos de configuração e diretórios de log
+  dolly --dry-run             Simula a sincronização (nada é copiado/apagado)
+  dolly [-y|--yes]            Executa a sincronização de fato
+  dolly --edit-path|-ep       Abre paths.conf no nano
+  dolly --edit-filter|-ef     Abre filters.txt no nano
+  dolly -h|--help             Mostra esta ajuda
+
+  Qualquer outra flag não reconhecida (ex.: --bwlimit 1M, --transfers 8,
+  --exclude "*.tmp") é repassada direto para o ${C_BOLD}rclone sync${C_RESET} de cada par.
 
 ${C_BOLD}CONFIGURAÇÃO${C_RESET}
   $PATHS_FILE
@@ -61,37 +130,45 @@ ${C_BOLD}EXEMPLOS${C_RESET}
   dolly init
   dolly --dry-run
   dolly -y
+  dolly --edit-path
+  dolly -y --bwlimit 1M --transfers 4
 EOF
 }
 
 require_rclone() {
   if ! command -v rclone >/dev/null 2>&1; then
-    err "rclone não encontrado no PATH. Instale-o antes de continuar (https://rclone.org/downloads/)."
+    err_box "rclone não encontrado no PATH. Instale-o antes de continuar (https://rclone.org/downloads/)."
     exit 1
   fi
 }
 
-cmd_init() {
-  mkdir -p "$CONFIG_DIR" "$LOGS_DIR/dry-run" "$LOGS_DIR/prod"
-  ok "Diretórios criados em $CONFIG_DIR e $LOGS_DIR"
+require_nano() {
+  if ! command -v nano >/dev/null 2>&1; then
+    err_box "nano não encontrado no PATH. Instale-o ou edite o arquivo manualmente."
+    exit 1
+  fi
+}
 
+# cria $PATHS_FILE com o template padrão se ainda não existir; devolve 1 se já existia
+ensure_paths_file() {
   if [ -f "$PATHS_FILE" ]; then
-    warn "$PATHS_FILE já existe, mantendo como está"
-  else
-    cat > "$PATHS_FILE" <<'EOF'
+    return 1
+  fi
+  cat > "$PATHS_FILE" <<'EOF'
 # dolly - pares de sincronização
 # Formato: source|destination  (um par por linha)
 # Linhas em branco ou iniciadas com # são ignoradas.
 /home/sanotsroger/Downloads/dolly/source/dir_app|/home/sanotsroger/Downloads/dolly/destination/src/dir_app
 /home/sanotsroger/Downloads/dolly/source/dir_test|/home/sanotsroger/Downloads/dolly/destination/src/other/dir_test
 EOF
-    ok "Criado $PATHS_FILE"
-  fi
+}
 
+# cria $FILTERS_FILE com o template padrão se ainda não existir; devolve 1 se já existia
+ensure_filters_file() {
   if [ -f "$FILTERS_FILE" ]; then
-    warn "$FILTERS_FILE já existe, mantendo como está"
-  else
-    cat > "$FILTERS_FILE" <<'EOF'
+    return 1
+  fi
+  cat > "$FILTERS_FILE" <<'EOF'
 # dolly - regras de exclusão (formato --filter-from do rclone)
 # Descomente/adicione linhas "- padrao" para excluir arquivos/diretórios.
 # - .git/**
@@ -100,19 +177,53 @@ EOF
 # - *.log
 # - .DS_Store
 EOF
-    ok "Criado $FILTERS_FILE"
+}
+
+cmd_init() {
+  mkdir -p "$CONFIG_DIR" "$LOGS_DIR/dry-run" "$LOGS_DIR/prod"
+
+  box_top "dolly · init"
+  box_line "✔ Diretórios criados em $CONFIG_DIR e $LOGS_DIR" \
+    "$(printf '%s✔%s Diretórios criados em %s e %s' "$C_GREEN" "$C_RESET" "$CONFIG_DIR" "$LOGS_DIR")"
+
+  if ensure_paths_file; then
+    box_line "✔ Criado $PATHS_FILE" "$(printf '%s✔%s Criado %s' "$C_GREEN" "$C_RESET" "$PATHS_FILE")"
+  else
+    box_line "⚠ $PATHS_FILE já existe, mantendo como está" \
+      "$(printf '%s⚠%s %s já existe, mantendo como está' "$C_YELLOW" "$C_RESET" "$PATHS_FILE")"
   fi
 
-  echo
-  info "Edite os arquivos acima e depois rode: ${C_BOLD}dolly --dry-run${C_RESET}"
+  if ensure_filters_file; then
+    box_line "✔ Criado $FILTERS_FILE" "$(printf '%s✔%s Criado %s' "$C_GREEN" "$C_RESET" "$FILTERS_FILE")"
+  else
+    box_line "⚠ $FILTERS_FILE já existe, mantendo como está" \
+      "$(printf '%s⚠%s %s já existe, mantendo como está' "$C_YELLOW" "$C_RESET" "$FILTERS_FILE")"
+  fi
+
+  box_line ""
+  box_line "Edite com --edit-path/--edit-filter e depois rode: dolly --dry-run"
+  box_bottom
+}
+
+cmd_edit_path() {
+  mkdir -p "$CONFIG_DIR"
+  ensure_paths_file || true
+  require_nano
+  nano "$PATHS_FILE"
+}
+
+cmd_edit_filter() {
+  mkdir -p "$CONFIG_DIR"
+  ensure_filters_file || true
+  require_nano
+  nano "$FILTERS_FILE"
 }
 
 # Preenche o array global JOBS com entradas "job|source|destination"
 load_paths() {
   JOBS=()
   if [ ! -f "$PATHS_FILE" ]; then
-    err "Arquivo de configuração não encontrado: $PATHS_FILE"
-    err "Rode '${SCRIPT_NAME} init' primeiro."
+    err_box "Arquivo de configuração não encontrado: $PATHS_FILE" "Rode '${SCRIPT_NAME} init' primeiro."
     exit 1
   fi
 
@@ -137,13 +248,14 @@ load_paths() {
   done < "$PATHS_FILE"
 
   if [ "${#JOBS[@]}" -eq 0 ]; then
-    err "Nenhum par válido em $PATHS_FILE."
+    err_box "Nenhum par válido em $PATHS_FILE."
     exit 1
   fi
 }
 
 run_sync() {
-  local is_dry_run="$1"
+  local is_dry_run="$1"; shift
+  local extra_rclone_args=("$@")
   require_rclone
   load_paths
 
@@ -165,12 +277,13 @@ run_sync() {
     echo
   } > "$summary_file"
 
-  if [ "$is_dry_run" = "1" ]; then
-    heading "dolly (dry-run)"
-  else
-    heading "dolly (execução real)"
-  fi
-  info "Logs desta execução: $run_dir"
+  local mode_label="execução real"
+  [ "$is_dry_run" = "1" ] && mode_label="dry-run"
+
+  box_top "dolly · $mode_label"
+  box_line "Logs desta execução: $run_dir"
+  [ "${#extra_rclone_args[@]}" -gt 0 ] && box_line "Flags extras: ${extra_rclone_args[*]}"
+  box_bottom
 
   local entry job rest src dst rlog clog combined_raw rc_args status added modified removed cline
   local stats_bytes stats_elapsed
@@ -183,9 +296,9 @@ run_sync() {
     rlog="$run_dir/$job.rclone.log"
     clog="$run_dir/$job.changes.log"
 
-    heading "→ $job"
-    printf '  %s📂 %s%s\n' "$C_DIM" "$src" "$C_RESET"
-    printf '  %s💾 %s%s\n' "$C_DIM" "$dst" "$C_RESET"
+    box_top "→ $job"
+    box_line "origem   $src"  "$(printf 'origem   %s%s%s' "$C_DIM" "$src" "$C_RESET")"
+    box_line "destino  $dst"  "$(printf 'destino  %s%s%s' "$C_DIM" "$dst" "$C_RESET")"
 
     mkdir -p "$dst"
 
@@ -193,6 +306,7 @@ run_sync() {
     rc_args=(sync "$src" "$dst" "${filter_args[@]}" --create-empty-src-dirs -v \
       --log-file "$rlog" --combined "$combined_raw")
     [ "$is_dry_run" = "1" ] && rc_args+=(--dry-run)
+    [ "${#extra_rclone_args[@]}" -gt 0 ] && rc_args+=("${extra_rclone_args[@]}")
 
     status=0
     rclone "${rc_args[@]}" || status=$?
@@ -207,34 +321,42 @@ run_sync() {
     removed="$(grep -c '^- ' "$clog" 2>/dev/null || true)"
     added=${added:-0}; modified=${modified:-0}; removed=${removed:-0}
 
+    box_line ""
+
     if [ "$status" -ne 0 ]; then
-      err "$job falhou (rclone exit $status) - veja $rlog"
+      box_line "✖ falhou (rclone exit $status) — veja $rlog" \
+        "$(printf '%s✖ falhou (rclone exit %s)%s — veja %s' "$C_RED" "$status" "$C_RESET" "$rlog")"
       any_failed=1
     else
-      ok "$job concluído — ${C_GREEN}+$added${C_RESET} ${C_YELLOW}~$modified${C_RESET} ${C_RED}-$removed${C_RESET}"
+      box_line "✔ concluído   +$added adicionados   ~$modified modificados   -$removed removidos" \
+        "$(printf '%s✔ concluído%s   %s+%s%s adicionados   %s~%s%s modificados   %s-%s%s removidos' \
+          "$C_GREEN" "$C_RESET" "$C_GREEN" "$added" "$C_RESET" "$C_YELLOW" "$modified" "$C_RESET" "$C_RED" "$removed" "$C_RESET")"
     fi
 
     # rclone grava "Transferred:"/"Elapsed time:" com espaçamento inconsistente
     # (tab numa linha, espaços na outra); realinhamos nós mesmos ao exibir.
     stats_bytes="$(grep -E '^Transferred:.*ETA' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Transferred:[[:space:]]*//')"
     stats_elapsed="$(grep -E '^Elapsed time:' "$rlog" 2>/dev/null | tail -1 | sed -E 's/^Elapsed time:[[:space:]]*//')"
-    if [ -n "$stats_bytes" ]; then
-      printf '  %s%-14s%s%s\n' "$C_DIM" "Transferred:" "$C_RESET" "$stats_bytes"
-    fi
-    if [ -n "$stats_elapsed" ]; then
-      printf '  %s%-14s%s%s\n' "$C_DIM" "Elapsed time:" "$C_RESET" "$stats_elapsed"
-    fi
+    [ -n "$stats_bytes" ]   && box_line "$(printf '%-11s %s' "transferido" "$stats_bytes")"
+    [ -n "$stats_elapsed" ] && box_line "$(printf '%-11s %s' "tempo" "$stats_elapsed")"
 
     if [ -s "$clog" ]; then
+      box_divider
+      local total_lines
+      total_lines="$(wc -l < "$clog" | tr -d ' ')"
       while IFS= read -r cline; do
         case "$cline" in
-          '+ '*) printf '    %s%s%s\n' "$C_GREEN" "$cline" "$C_RESET" ;;
-          '* '*) printf '    %s%s%s\n' "$C_YELLOW" "$cline" "$C_RESET" ;;
-          '- '*) printf '    %s%s%s\n' "$C_RED" "$cline" "$C_RESET" ;;
-          *) printf '    %s\n' "$cline" ;;
+          '+ '*) box_line "$cline" "$(printf '%s%s%s' "$C_GREEN" "$cline" "$C_RESET")" ;;
+          '* '*) box_line "$cline" "$(printf '%s%s%s' "$C_YELLOW" "$cline" "$C_RESET")" ;;
+          '- '*) box_line "$cline" "$(printf '%s%s%s' "$C_RED" "$cline" "$C_RESET")" ;;
+          *) box_line "$cline" ;;
         esac
-      done < "$clog"
+      done < <(head -n "$MAX_CHANGE_LINES" "$clog")
+      if [ "$total_lines" -gt "$MAX_CHANGE_LINES" ]; then
+        box_line "$(printf '… e mais %d alterações (ver %s)' "$((total_lines - MAX_CHANGE_LINES))" "$clog")"
+      fi
     fi
+    box_bottom
 
     {
       echo "## $job"
@@ -251,10 +373,16 @@ run_sync() {
     total_del=$((total_del + removed))
   done
 
-  heading "Resumo"
-  printf '  %s+%s%s adicionados   %s~%s%s modificados   %s-%s%s removidos\n' \
-    "$C_GREEN" "$total_add" "$C_RESET" "$C_YELLOW" "$total_mod" "$C_RESET" "$C_RED" "$total_del" "$C_RESET"
-  info "Logs completos em: $run_dir"
+  local grand_total=$((total_add + total_mod + total_del))
+  box_top "Resumo"
+  box_line "$(printf '%s pares processados · %s alterações' "${#JOBS[@]}" "$grand_total")"
+  box_line ""
+  meter_bar "adicionados" "$total_add" "$grand_total" "$C_GREEN"
+  meter_bar "modificados" "$total_mod" "$grand_total" "$C_YELLOW"
+  meter_bar "removidos"   "$total_del" "$grand_total" "$C_RED"
+  box_line ""
+  box_line "Logs completos em: $run_dir"
+  box_bottom
 
   {
     echo "## Totais"
@@ -262,7 +390,7 @@ run_sync() {
   } >> "$summary_file"
 
   if [ "$any_failed" -ne 0 ]; then
-    err "Um ou mais jobs falharam."
+    err_box "Um ou mais jobs falharam."
     exit 1
   fi
 }
@@ -278,29 +406,41 @@ confirm_prod() {
 }
 
 main() {
-  local cmd="${1:-}"
-  case "$cmd" in
+  case "${1:-}" in
     init)
       cmd_init
-      ;;
-    --dry-run)
-      run_sync 1
+      return
       ;;
     -h|--help|help)
       usage
+      return
       ;;
-    ""|-y|--yes)
-      if [ "$cmd" != "-y" ] && [ "$cmd" != "--yes" ]; then
-        confirm_prod
-      fi
-      run_sync 0
+    --edit-path|-ep)
+      cmd_edit_path
+      return
       ;;
-    *)
-      err "Opção desconhecida: $cmd"
-      usage
-      exit 1
+    --edit-filter|-ef)
+      cmd_edit_filter
+      return
       ;;
   esac
+
+  # flags próprias do dolly são consumidas aqui; qualquer outro argumento é
+  # repassado como flag nativa do rclone (ex.: --bwlimit 1M, --transfers 8).
+  local is_dry_run=0 auto_yes=0
+  local extra_rclone_args=() arg
+  for arg in "$@"; do
+    case "$arg" in
+      --dry-run) is_dry_run=1 ;;
+      -y|--yes) auto_yes=1 ;;
+      *) extra_rclone_args+=("$arg") ;;
+    esac
+  done
+
+  if [ "$is_dry_run" -eq 0 ] && [ "$auto_yes" -eq 0 ]; then
+    confirm_prod
+  fi
+  run_sync "$is_dry_run" "${extra_rclone_args[@]}"
 }
 
 main "$@"
