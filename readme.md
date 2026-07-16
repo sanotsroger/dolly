@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="160" alt="Logo do Dolly: uma ovelha com um selo de clonagem" />
+<img src="assets/logo.svg" width="240" alt="Logo do Dolly: uma ovelha com um selo de clonagem" />
 
 # dolly
 
