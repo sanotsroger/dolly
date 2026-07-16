@@ -339,8 +339,9 @@ choose_run_dir() {
   } >&2
 
   local reply idx
-  printf 'Escolha o diretório [1-%d]: ' "${#shown[@]}" >&2
+  printf 'Escolha o diretório [1-%d] (padrão: 1): ' "${#shown[@]}" >&2
   read -r reply
+  reply="${reply:-1}"
   case "$reply" in
     ''|*[!0-9]*)
       err_box "Escolha inválida: '$reply'."
@@ -368,8 +369,9 @@ choose_log_mode() {
   } >&2
 
   local reply
-  printf 'Escolha [1-2]: ' >&2
+  printf 'Escolha [1-2] (padrão: 1): ' >&2
   read -r reply
+  reply="${reply:-1}"
   case "$reply" in
     1) printf '%s' "$LOGS_DIR/dry-run" ;;
     2) printf '%s' "$LOGS_DIR/prod" ;;
@@ -438,8 +440,9 @@ cmd_view_log() {
     box_bottom
 
     local reply idx
-    printf 'Escolha o arquivo [1-%d]: ' "${#logs[@]}"
+    printf 'Escolha o arquivo [1-%d] (padrão: 1): ' "${#logs[@]}"
     read -r reply
+    reply="${reply:-1}"
     case "$reply" in
       ''|*[!0-9]*)
         err_box "Escolha inválida: '$reply'."
